@@ -1,81 +1,228 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
+using System.Text.Json;
+using Microsoft.OpenApi.Models;
+using System.Security.Claims;
 using loja.data;
-using loja.models;
 using loja.services;
+using loja.models;
+
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-// Configurar conexao com o banco de dados
+// Configurando conexao com o bd
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-builder.Services.AddDbContext<LojaDbContext>(options => options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 36))));
+builder.Services.AddDbContext<LojaDbContext>(options => 
+    options.UseMySql(connectionString, new MySqlServerVersion(new Version(8, 0, 36))));
 
-// Adicionar ProductService ao container de dependências
+// Configuração da autenticação jwt
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = false,
+        ValidateAudience = false,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.ASCII.GetBytes("abc"))
+    };
+});
+
 builder.Services.AddScoped<ProductService>();
+builder.Services.AddScoped<FornecedorService>();
+builder.Services.AddScoped<UsuarioService>();
+builder.Services.AddScoped<VendaService>();
+
+// Adicionar serviços do Swagger ao contêiner
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Loja API", Version = "v1" });
+});
+
+// Adicionar serviços de autorização
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
+// Middleware para roteamento
+app.UseRouting();
+
+// Middleware para autenticação
+app.UseAuthentication();
+
+// Middleware para autorização
+app.UseAuthorization();
+
+// Definição das rotas
+app.MapGet("/rotaProtegida", async (HttpContext context) =>
+{
+    // Verifica se o token está presente no cabeçalho de autorização
+    if (!context.Request.Headers.ContainsKey("Authorization"))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsync("Token não fornecido");
+        return;
+    }
+
+    // Obtém o token do cabeçalho de autorização
+    var token = context.Request.Headers["Authorization"].ToString().Replace("Bearer ", "");
+
+    // Valida o token
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var key = Encoding.ASCII.GetBytes("abc");
+    var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(key),
+        ValidateIssuer = false,
+        ValidateAudience = false,
+        ClockSkew = TimeSpan.Zero
+    }, out var validatedToken);
+
+    // Retorna o nome de usuário (email) presente no token
+    var email = principal.FindFirst(ClaimTypes.Email)?.Value;
+    await context.Response.WriteAsync($"Usuário autenticado: {email}");
+});
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Loja API v1");
+    });
 }
 
 app.UseHttpsRedirection();
 
-// Endpoint para criar um novo produto
-app.MapPost("/createproduto", async (ProductService productService, Produto newProduto) =>
+// Método para gerar o token (deve ser movido para uma classe separada posteriormente)
+//
+string GenerateToken(string email)
 {
-    await productService.AddProductAsync(newProduto);
-    return Results.Created($"/createproduto/{newProduto.Id}", newProduto);
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var key = Encoding.ASCII.GetBytes("senhasegura123");
+    var tokenDescriptor = new SecurityTokenDescriptor
+    {
+        Subject = new System.Security.Claims.ClaimsIdentity(new[] { new System.Security.Claims.Claim("email", email) }),
+        Expires = DateTime.UtcNow.AddHours(1),
+        SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+    };
+    var token = tokenHandler.CreateToken(tokenDescriptor);
+    return tokenHandler.WriteToken(token);
+}
+
+// Endpoint de Login --------------------------------------------------
+//
+app.MapPost("/login", async (HttpContext context) =>
+{
+    // Receber o request
+    using var reader = new StreamReader(context.Request.Body);
+    var body = await reader.ReadToEndAsync();
+
+    // Deserializar o objeto
+    var json = JsonDocument.Parse(body);
+    var username = json.RootElement.GetProperty("username").GetString();
+    var email = json.RootElement.GetProperty("email").GetString();
+    var senha = json.RootElement.GetProperty("senha").GetString();
+
+    // Esta parte do código será complementada com a service na próxima aula
+    var token = "";
+    if (senha == "1029") // Exemplo de validação de senha
+    {
+        token = GenerateToken(email);
+    }
+    
+    await context.Response.WriteAsync(token);
 });
 
-// Endpoint para mostrar todos os produtos
+// Rota Segura
+app.MapGet("/rotaSegura", async (HttpContext context) =>
+{
+    // Verificar se o token está presente
+    if (!context.Request.Headers.ContainsKey("Authorization"))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsync("Token não fornecido");
+        return;
+    }
+
+    // Obter o token
+    var token = context.Request.Headers["Authorization"].ToString().Replace("Bearer ", "");
+
+    // Validar o token
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var key = Encoding.ASCII.GetBytes("abcabcabcabcabcabcabcabcabcabcabc"); // Chave secreta (a mesma utilizada para gerar o token)
+    try
+    {
+        tokenHandler.ValidateToken(token, new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(key),
+            ValidateIssuer = false,
+            ValidateAudience = false,
+        }, out SecurityToken validatedToken);
+    }
+    catch
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsync("Token inválido");
+        return;
+    }
+
+    await context.Response.WriteAsync("Acesso autorizado");
+});
+
+// Endpoint de Produto ------------------------------------------------
+// Método para gravar um novo produto
+app.MapPost("/createproduto", async (Produto produto, ProductService productService) =>
+{
+    await productService.AddProductAsync(produto);
+    return Results.Created($"/produtos/{produto.Id}", produto);
+});
+
+// Método para consultar todos os produtos
 app.MapGet("/produtos", async (ProductService productService) =>
 {
     var produtos = await productService.GetAllProductsAsync();
     return Results.Ok(produtos);
 });
 
-// Endpoint para mostrar um produto por ID
+// Método para consultar um produto a partir do seu Id
 app.MapGet("/produtos/{id}", async (int id, ProductService productService) =>
 {
     var produto = await productService.GetProductByIdAsync(id);
     if (produto == null)
     {
-        return Results.NotFound($"Produto with ID {id} not found.");
+        return Results.NotFound($"Product with ID {id} not found.");
     }
     return Results.Ok(produto);
 });
 
-// Endpoint para atualizar um produto existente
-app.MapPut("/produtos/{id}", async (int id, ProductService productService, Produto updatedProduto) =>
+// Método para atualizar os dados de um produto
+app.MapPut("/produtos/{id}", async (int id, Produto produto, ProductService productService) =>
 {
-    var existingProduto = await productService.GetProductByIdAsync(id);
-    if (existingProduto == null)
+    if (id != produto.Id)
     {
-        return Results.NotFound($"Produto with ID {id} not found");
+        return Results.BadRequest("Product ID mismatch.");
     }
-
-    // Atualiza os dados do existingProduto 
-    existingProduto.Nome = updatedProduto.Nome;
-    existingProduto.Preco = updatedProduto.Preco;
-    existingProduto.Fornecedor = updatedProduto.Fornecedor;
-
-    // Salva no banco de dados
-    await productService.UpdateProductAsync(existingProduto);
-
-    // Retorna para o cliente que invocou o endpoint
-    return Results.Ok(existingProduto);
+    await productService.UpdateProductAsync(produto);
+    return Results.Ok();
 });
 
-// Parte Cliente ---------------------------------------------------------------------------
+// Método para excluir um produto
+app.MapDelete("/produtos/{id}", async (int id, ProductService productService) =>
+{
+    await productService.DeleteProductAsync(id);
+    return Results.Ok();
+});
 
-// Endpoint para criar um novo cliente
+// Endpoint de Cliente -------------------------------------------------
+//
 app.MapPost("/createcliente", async (LojaDbContext dbContext, Cliente newCliente) =>
 {
     dbContext.Clientes.Add(newCliente);
@@ -83,94 +230,202 @@ app.MapPost("/createcliente", async (LojaDbContext dbContext, Cliente newCliente
     return Results.Created($"/createcliente/{newCliente.Id}", newCliente);
 });
 
-// Endpoint para mostrar todos os clientes
 app.MapGet("/clientes", async (LojaDbContext dbContext) =>
 {
     var clientes = await dbContext.Clientes.ToListAsync();
     return Results.Ok(clientes);
 });
 
-// Endpoint para mostrar cliente por ID
 app.MapGet("/clientes/{id}", async (int id, LojaDbContext dbContext) =>
 {
-    var clientes = await dbContext.Clientes.FindAsync(id);
-    if (clientes == null)
+    var cliente = await dbContext.Clientes.FindAsync(id);
+    if (cliente == null)
     {
         return Results.NotFound($"Cliente with ID {id} not found.");
     }
-    return Results.Ok(clientes);
+    return Results.Ok(cliente);
 });
 
-// Endpoin para atualizar cliente por ID
-app.MapPut("/clientes/{id}", async (int id, LojaDbContext dbContext, Cliente updatedFornecedor) =>
+app.MapPut("/clientes/{id}", async (int id, LojaDbContext dbContext, Cliente updateCliente) =>
 {
     var existingCliente = await dbContext.Clientes.FindAsync(id);
     if (existingCliente == null)
     {
-        return Results.NotFound($"Fornecedor with ID {id} not found");
+        return Results.NotFound($"Cliente with ID {id} not found.");
     }
 
-    // Atualiza os dados do existingCliente 
-    existingCliente.Nome = updatedFornecedor.Nome;
-    existingCliente.Cpf = updatedFornecedor.Cpf;
-    existingCliente.Email = updatedFornecedor.Email;
+    existingCliente.Nome = updateCliente.Nome;
+    existingCliente.Cpf = updateCliente.Cpf;
+    existingCliente.Email = updateCliente.Email;
 
-    // Salva no banco de dados
     await dbContext.SaveChangesAsync();
 
-    // Retorna para o cliente que invocou o endpoint
     return Results.Ok(existingCliente);
 });
 
-// Desafio 1 - Fornecedor --------------------------------------------------------------------
-// Endpoint para criar um novo fornecedor
-app.MapPost("/createfornecedor", async (LojaDbContext dbContext, Fornecedor newFornecedor) =>
+// Endpoint de Fornecedor -------------------------------------------
+// Método para gravar um novo fornecedor
+app.MapPost("/createfornecedor", async (Fornecedor fornecedor, FornecedorService fornecedorService) =>
 {
-    dbContext.Fornecedores.Add(newFornecedor);
-    await dbContext.SaveChangesAsync();
-    return Results.Created($"/createfornecedor/{newFornecedor.Id}", newFornecedor);
+    await fornecedorService.AddFornecedorAsync(fornecedor);
+    return Results.Created($"/fornecedores/{fornecedor.Id}", fornecedor);
 });
 
-// Endpoint para mostrar todos os fornecedores
-app.MapGet("/fornecedores", async (LojaDbContext dbContext) =>
+// Método para consultar todos os fornecedores
+app.MapGet("/fornecedores", async (FornecedorService fornecedorService) =>
 {
-    var fornecedores = await dbContext.Fornecedores.ToListAsync();
+    var fornecedores = await fornecedorService.GetAllFornecedoresAsync();
     return Results.Ok(fornecedores);
 });
 
-// Endpoint para mostrar fornecedor por ID
-app.MapGet("/fornecedores/{id}", async (int id, LojaDbContext dbContext) =>
+// Método para consultar um fornecedor a partir do seu Id
+app.MapGet("/fornecedores/{id}", async (int id, FornecedorService fornecedorService) =>
 {
-    var fornecedores = await dbContext.Fornecedores.FindAsync(id);
-    if (fornecedores == null)
+    var fornecedor = await fornecedorService.GetFornecedorByIdAsync(id);
+    if (fornecedor == null)
     {
-        return Results.NotFound($"Fornecedores with ID {id} not found.");
+        return Results.NotFound($"Fornecedor with ID {id} not found.");
     }
-    return Results.Ok(fornecedores);
+    return Results.Ok(fornecedor);
 });
 
-// Endpoint para atualizar fornecedor por ID
-app.MapPut("/fornecedores/{id}", async (int id, LojaDbContext dbContext, Fornecedor updatedFornecedor) =>
+// Método para atualizar os dados de um fornecedor
+app.MapPut("/fornecedores/{id}", async (int id, Fornecedor fornecedor, FornecedorService fornecedorService) =>
 {
-    var existingFornecedor = await dbContext.Fornecedores.FindAsync(id);
-    if (existingFornecedor == null)
+    if (id != fornecedor.Id)
     {
-        return Results.NotFound($"Produto with ID {id} not found");
+        return Results.BadRequest("Fornecedor ID mismatch.");
+    }
+    await fornecedorService.UpdateFornecedorAsync(fornecedor);
+    return Results.Ok();
+});
+
+// Método para excluir um fornecedor
+app.MapDelete("/fornecedores/{id}", async (int id, FornecedorService fornecedorService) =>
+{
+    await fornecedorService.DeleteFornecedorAsync(id);
+    return Results.Ok();
+});
+
+// Endpoint de Usuario ------------------------------------------------
+// Método para gravar um novo usuário
+app.MapPost("/createusuario", async (Usuario usuario, UsuarioService usuarioService) =>
+{
+    await usuarioService.AddUsuarioAsync(usuario);
+    return Results.Created($"/usuarios/{usuario.Id}", usuario);
+});
+
+// Método para consultar todos os usuários
+app.MapGet("/usuarios", async (UsuarioService usuarioService) =>
+{
+    var usuarios = await usuarioService.GetAllUsuariosAsync();
+    return Results.Ok(usuarios);
+});
+
+// Método para consultar um usuário a partir do seu Id
+app.MapGet("/usuarios/{id}", async (int id, UsuarioService usuarioService) =>
+{
+    var usuario = await usuarioService.GetUsuarioByIdAsync(id);
+    if (usuario == null)
+    {
+        return Results.NotFound($"Usuario with ID {id} not found.");
+    }
+    return Results.Ok(usuario);
+});
+
+// Método para atualizar os dados de um usuário
+app.MapPut("/usuarios/{id}", async (int id, Usuario usuario, UsuarioService usuarioService) =>
+{
+    if (id != usuario.Id)
+    {
+        return Results.BadRequest("Usuario ID mismatch.");
+    }
+    await usuarioService.UpdateUsuarioAsync(usuario);
+    return Results.Ok();
+});
+
+// Método para excluir um usuário
+app.MapDelete("/usuarios/{id}", async (int id, UsuarioService usuarioService) =>
+{
+    await usuarioService.DeleteUsuarioAsync(id);
+    return Results.Ok();
+});
+
+// Endpoints de Venda ----------------------------------------------
+// Gravar uma venda
+app.MapPost("/createvenda", async (Venda venda, VendaService vendaService, ProductService productService, LojaDbContext dbContext) =>
+{
+    var cliente = await dbContext.Clientes.FindAsync(venda.ClienteId);
+    var produto = await dbContext.Produtos.FindAsync(venda.ProdutoId);
+
+    if (cliente == null || produto == null)
+    {
+        return Results.BadRequest("Cliente ou produto não encontrado.");
     }
 
-    // Atualiza os dados do existingFornecedor 
-    existingFornecedor.Cnpj = updatedFornecedor.Cnpj;
-    existingFornecedor.Nome = updatedFornecedor.Nome;
-    existingFornecedor.Endereco = updatedFornecedor.Endereco;
-    existingFornecedor.Email = updatedFornecedor.Email;
-    existingFornecedor.Telefone = updatedFornecedor.Telefone;
-
-    // Salva no banco de dados
-    await dbContext.SaveChangesAsync();
-
-    // Retorna para o cliente que invocou o endpoint
-    return Results.Ok(existingFornecedor);
+    venda.Cliente = cliente;
+    venda.Produto = produto;
+    await vendaService.AddVendaAsync(venda);
+    return Results.Created($"/vendas/{venda.Id}", venda);
 });
+
+// Consultar vendas por produto (detalhada)
+app.MapGet("/vendas/produto/{produtoId}", async (int produtoId, VendaService vendaService) =>
+{
+    var vendas = await vendaService.GetVendasByProdutoIdAsync(produtoId);
+    var result = vendas.Select(v => new
+    {
+        ProdutoNome = v.Produto.Nome,
+        DataVenda = v.DataVenda,
+        VendaId = v.Id,
+        ClienteNome = v.Cliente.Nome,
+        QuantidadeVendida = v.Quantidade,
+        PrecoVenda = v.PrecoUnitario
+    });
+    return Results.Ok(result);
+});
+
+// Consultar vendas por produto (resumida)
+app.MapGet("/vendas/produto/sum/{produtoId}", async (int produtoId, VendaService vendaService) =>
+{
+    var vendas = await vendaService.GetVendasByProdutoIdAsync(produtoId);
+    var result = new
+    {
+        ProdutoNome = vendas.First().Produto.Nome,
+        TotalQuantidadeVendida = vendas.Sum(v => v.Quantidade),
+        TotalPrecoVenda = vendas.Sum(v => v.PrecoUnitario * v.Quantidade)
+    };
+    return Results.Ok(result);
+});
+
+// Consultar vendas por cliente (detalhada)
+app.MapGet("/vendas/cliente/{clienteId}", async (int clienteId, VendaService vendaService) =>
+{
+    var vendas = await vendaService.GetVendasByClienteIdAsync(clienteId);
+    var result = vendas.Select(v => new
+    {
+        ProdutoNome = v.Produto.Nome,
+        DataVenda = v.DataVenda,
+        VendaId = v.Id,
+        QuantidadeVendida = v.Quantidade,
+        PrecoVenda = v.PrecoUnitario
+    });
+    return Results.Ok(result);
+});
+
+// Consultar vendas por cliente (resumida)
+app.MapGet("/vendas/cliente/sum/{clienteId}", async (int clienteId, VendaService vendaService) =>
+{
+    var vendas = await vendaService.GetVendasByClienteIdAsync(clienteId);
+    var result = new
+    {
+        ClienteNome = vendas.First().Cliente.Nome,
+        TotalQuantidadeVendida = vendas.Sum(v => v.Quantidade),
+        TotalPrecoVenda = vendas.Sum(v => v.PrecoUnitario * v.Quantidade)
+    };
+    return Results.Ok(result);
+});
+
 
 var summaries = new[]
 {

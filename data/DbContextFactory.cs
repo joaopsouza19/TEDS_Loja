@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
+using System;
 using System.IO;
 
 namespace loja.data
@@ -11,7 +12,6 @@ namespace loja.data
         {
             var optionsBuilder = new DbContextOptionsBuilder<LojaDbContext>();
 
-            // Build configuration
             IConfigurationRoot configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
                 .AddJsonFile("appsettings.json")
